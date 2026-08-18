@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 
 use crate::{
-    scanner::{LoadOutcome, ScanOutcome, calculate_size, load_children},
+    scanner::{LoadOutcome, ScanOptions, ScanOutcome, calculate_size, load_children},
     tree::NodeId,
 };
 
@@ -21,12 +21,14 @@ pub enum ScanJob {
         generation: u64,
         node_id: NodeId,
         path: PathBuf,
+        options: ScanOptions,
     },
     CalculateSize {
         generation: u64,
         node_id: NodeId,
         scan_revision: u64,
         path: PathBuf,
+        options: ScanOptions,
     },
 }
 
@@ -135,7 +137,8 @@ fn worker_loop(
                 generation,
                 node_id,
                 path,
-            } => match load_children(&path, || {
+                options,
+            } => match load_children(&path, options, || {
                 active_generation.load(Ordering::Relaxed) != generation
             }) {
                 Ok(outcome) if !outcome.cancelled => {
@@ -169,6 +172,7 @@ fn worker_loop(
                 node_id,
                 scan_revision,
                 path,
+                options,
             } => {
                 if results
                     .send(WorkerEvent::SizeStarted {
@@ -180,7 +184,7 @@ fn worker_loop(
                 {
                     break;
                 }
-                let outcome = calculate_size(&path, || {
+                let outcome = calculate_size(&path, options, || {
                     active_generation.load(Ordering::Relaxed) != generation
                 });
                 if !outcome.cancelled
