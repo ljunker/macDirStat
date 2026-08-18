@@ -1,0 +1,25 @@
+[package]
+name = "mac-dir-stat"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A responsive macOS terminal disk usage explorer"
+default-run = "macDirStat"
+
+[[bin]]
+name = "macDirStat"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+crossbeam-channel = "0.5"
+crossterm = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+slotmap = "1.1"
+thiserror = "2.0"
+trash = "5.2"
+walkdir = "2.5"
+
+[dev-dependencies]
+tempfile = "3.27"

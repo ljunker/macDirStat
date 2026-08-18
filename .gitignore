@@ -1,0 +1,38 @@
+# Rust / Cargo build output
+/target/
+**/*.rs.bk
+*.profraw
+
+# Cargo.lock belongs in version control for this application.
+!Cargo.lock
+
+# IDE and editor-local state
+/.idea/
+/.vscode/
+*.iml
+*.ipr
+*.iws
+*.swp
+*.swo
+*~
+
+# Local environment and logs
+.env
+.env.*
+!.env.example
+*.log
+
+# Test and coverage output
+/coverage/
+/tarpaulin-report.html
+/cobertura.xml
+/lcov.info
+
+# macOS filesystem metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+*.dSYM/
