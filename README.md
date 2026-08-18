@@ -26,6 +26,18 @@ Für einen Start direkt aus dem Quellverzeichnis:
 cargo run --release -- ~/Library
 ```
 
+### Fertige macOS-Binaries
+
+GitHub Releases enthalten getrennte Archive für Apple Silicon (`arm64`) und
+Intel-Macs (`x86_64`). Nach dem Download kann das passende Archiv beispielsweise
+so installiert werden:
+
+```bash
+tar -xzf macDirStat-v0.1.0-macos-arm64.tar.gz
+mkdir -p ~/.local/bin
+install -m 755 macDirStat-v0.1.0-macos-arm64/macDirStat ~/.local/bin/macDirStat
+```
+
 ## Bedienung
 
 | Taste | Aktion |
@@ -68,4 +80,19 @@ die Größen der übergeordneten Ordner bis zum Startordner.
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
+```
+
+## Release erstellen
+
+Der Workflow [`.github/workflows/release.yml`](.github/workflows/release.yml)
+erstellt bei jedem gepushten Versionstag automatisch einen GitHub Release mit
+nativen macOS-Binaries und SHA-256-Prüfsummen. Der Tag muss dem Format
+`vMAJOR.MINOR.PATCH` entsprechen und exakt zur Version in `Cargo.toml` passen.
+
+Beispiel für Version `0.1.0`:
+
+```bash
+git tag -a v0.1.0 -m "macDirStat v0.1.0"
+git push origin main
+git push origin v0.1.0
 ```
