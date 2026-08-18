@@ -36,3 +36,6 @@
 .Spotlight-V100
 .Trashes
 *.dSYM/
+
+# Local product concept (intentionally excluded from repository history)
+/dustree_concept.md

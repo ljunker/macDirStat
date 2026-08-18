@@ -5,7 +5,7 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(
     name = "macDirStat",
-    version,
+    version = env!("MACDIRSTAT_VERSION"),
     about = "Explore directory sizes in a responsive terminal UI"
 )]
 pub struct Cli {
@@ -35,6 +35,15 @@ fn default_worker_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn reports_version_from_version_file() {
+        assert_eq!(
+            Cli::command().get_version(),
+            Some(env!("MACDIRSTAT_VERSION"))
+        );
+    }
 
     #[test]
     fn defaults_to_current_directory() {

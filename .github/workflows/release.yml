@@ -41,17 +41,22 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Verify tag and manifest version
+      - name: Verify release version
         run: |
           set -euo pipefail
           if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Release tags must use the format vMAJOR.MINOR.PATCH" >&2
             exit 1
           fi
+          release_version="$(tr -d '\r\n' < VERSION)"
           manifest_version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "mac-dir-stat"))')"
           tag_version="${GITHUB_REF_NAME#v}"
-          if [[ "$tag_version" != "$manifest_version" ]]; then
-            echo "Tag version $tag_version does not match Cargo.toml version $manifest_version" >&2
+          if [[ "$tag_version" != "$release_version" ]]; then
+            echo "Tag version $tag_version does not match VERSION $release_version" >&2
+            exit 1
+          fi
+          if [[ "$release_version" != "$manifest_version" ]]; then
+            echo "VERSION $release_version does not match Cargo.toml version $manifest_version" >&2
             exit 1
           fi
 
@@ -83,6 +88,7 @@ jobs:
           mkdir -p "dist/$package_name"
           install -m 755 "target/$TARGET/release/macDirStat" "dist/$package_name/macDirStat"
           cp README.md "dist/$package_name/README.md"
+          cp VERSION "dist/$package_name/VERSION"
           tar -C dist -czf "dist/${package_name}.tar.gz" "$package_name"
           (
             cd dist

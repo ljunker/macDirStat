@@ -3,6 +3,7 @@ name = "mac-dir-stat"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+build = "build.rs"
 description = "A responsive macOS terminal disk usage explorer"
 default-run = "macDirStat"
 

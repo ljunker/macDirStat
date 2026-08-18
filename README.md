@@ -87,7 +87,13 @@ cargo test
 Der Workflow [`.github/workflows/release.yml`](.github/workflows/release.yml)
 erstellt bei jedem gepushten Versionstag automatisch einen GitHub Release mit
 nativen macOS-Binaries und SHA-256-Prüfsummen. Der Tag muss dem Format
-`vMAJOR.MINOR.PATCH` entsprechen und exakt zur Version in `Cargo.toml` passen.
+`vMAJOR.MINOR.PATCH` entsprechen und exakt zur führenden Version in [`VERSION`](VERSION)
+passen.
+
+Für eine neue Version zuerst `VERSION` und den von Cargo benötigten Spiegel in
+`Cargo.toml` ändern. Das Build-Skript bricht jeden Build ab, wenn beide Werte
+nicht identisch sind. Anschließend `Cargo.lock` mit einem normalen Cargo-Aufruf
+aktualisieren und die Prüfungen ausführen.
 
 Beispiel für Version `0.1.0`:
 
