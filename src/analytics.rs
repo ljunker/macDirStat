@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    ffi::OsString,
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -76,8 +75,6 @@ impl FileCategory {
 pub struct FileRecord {
     #[serde(with = "crate::portable_path")]
     pub path: PathBuf,
-    #[serde(skip)]
-    pub name: OsString,
     pub usage: UsageStats,
     pub identity: FileIdentity,
     pub modified_seconds: i64,
@@ -326,6 +323,14 @@ impl AnalysisWorker {
     pub fn try_recv(&self) -> Result<AnalysisEvent, TryRecvError> {
         self.event_rx.try_recv()
     }
+
+    pub fn discard_pending(&self) -> usize {
+        let mut discarded = 0;
+        while self.event_rx.try_recv().is_ok() {
+            discarded += 1;
+        }
+        discarded
+    }
 }
 
 impl Drop for AnalysisWorker {
@@ -507,7 +512,6 @@ fn scan_index(
         let (modified_seconds, modified_nanoseconds) = metadata_modified(&metadata);
         batch.push(FileRecord {
             path: entry.path().to_path_buf(),
-            name: entry.file_name().to_os_string(),
             usage,
             identity,
             modified_seconds,

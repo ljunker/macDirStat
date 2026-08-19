@@ -56,7 +56,10 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
         .analysis_index
         .as_ref()
         .filter(|_| app.active_view != ViewKind::Tree)
-        .map_or_else(|| app.tree.root_known_usage(), |index| index.root_usage());
+        .map_or_else(
+            || app.tree.root_known_usage(),
+            |_| app.analysis_known_usage(),
+        );
     let visible = if app.active_view == ViewKind::Tree {
         app.visible.len()
     } else {
@@ -117,7 +120,7 @@ fn render_analysis(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
         .analysis_scroll
         .saturating_add(app.page_size)
         .min(app.analysis_rows.len());
-    let items = app.analysis_rows[app.analysis_scroll..end]
+    let mut items = app.analysis_rows[app.analysis_scroll..end]
         .iter()
         .map(|row| {
             let marker = row
@@ -142,6 +145,18 @@ fn render_analysis(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
             ]))
         })
         .collect::<Vec<_>>();
+    if items.is_empty() {
+        let message = match app.analysis_status {
+            AnalysisStatus::Indexing => "… Building full analysis index in the background",
+            AnalysisStatus::Hashing => "… Hashing exact duplicate candidates",
+            AnalysisStatus::Ready if app.active_view == ViewKind::Changes => {
+                "No changes against the previous snapshot"
+            }
+            AnalysisStatus::Ready => "No matching entries",
+            AnalysisStatus::Idle => "Analysis has not started",
+        };
+        items.push(ListItem::new(Line::from(message)));
+    }
     let mut state = ListState::default();
     if !app.analysis_rows.is_empty()
         && app.analysis_selected >= app.analysis_scroll

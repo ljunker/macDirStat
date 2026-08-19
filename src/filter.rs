@@ -57,7 +57,13 @@ impl FilterExpression {
 
     pub fn matches_file(&self, file: &FileRecord, size_mode: SizeMode) -> bool {
         self.predicates.iter().all(|predicate| match predicate {
-            Predicate::Name(query) => file.name.to_string_lossy().to_lowercase().contains(query),
+            Predicate::Name(query) => file
+                .path
+                .file_name()
+                .unwrap_or(file.path.as_os_str())
+                .to_string_lossy()
+                .to_lowercase()
+                .contains(query),
             Predicate::Size(operator, size) => operator.matches(file.usage.size(size_mode), *size),
             Predicate::Age(operator, age) => {
                 file_age(file.modified_seconds).is_some_and(|value| operator.matches(value, *age))
@@ -271,7 +277,7 @@ fn normalized_extension(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::PathBuf};
+    use std::path::PathBuf;
 
     use super::*;
     use crate::{
@@ -282,7 +288,6 @@ mod tests {
     fn file(name: &str, logical: u64, extension: Option<&str>) -> FileRecord {
         FileRecord {
             path: PathBuf::from("/tmp").join(name),
-            name: OsString::from(name),
             usage: UsageStats {
                 logical,
                 physical: logical / 2,

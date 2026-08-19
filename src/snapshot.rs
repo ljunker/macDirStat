@@ -419,7 +419,6 @@ mod tests {
             completed_at: Some(2),
             files: vec![FileRecord {
                 path: path.clone(),
-                name: OsString::from(file_name),
                 usage,
                 identity: identity(2),
                 modified_seconds: 1,
@@ -447,7 +446,6 @@ mod tests {
         let mut previous = index(root, "grown", 10);
         previous.files.push(FileRecord {
             path: root.join("removed"),
-            name: OsString::from("removed"),
             usage: UsageStats {
                 logical: 4,
                 physical: 4,
@@ -462,7 +460,6 @@ mod tests {
         let mut current = index(root, "grown", 20);
         current.files.push(FileRecord {
             path: root.join("added"),
-            name: OsString::from("added"),
             usage: UsageStats {
                 logical: 5,
                 physical: 5,

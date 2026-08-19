@@ -40,6 +40,10 @@ const EVENT_POLL: Duration = Duration::from_millis(33);
 const SORT_INTERVAL: Duration = Duration::from_millis(200);
 const CACHE_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+const MAX_SCAN_EVENTS_PER_TICK: usize = 128;
+const MAX_ANALYSIS_EVENTS_PER_TICK: usize = 16;
+const MAX_FILE_EVENTS_PER_TICK: usize = 16;
+const MAX_ANALYSIS_ROWS: usize = 100_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PromptKind {
@@ -156,6 +160,8 @@ pub struct App {
     pub analysis_rows: Vec<AnalysisRow>,
     pub analysis_selected: usize,
     pub analysis_scroll: usize,
+    pub analysis_rows_truncated: bool,
+    analysis_found_usage: crate::tree::UsageStats,
     pub comparison: Option<SnapshotComparison>,
     pub watch_enabled: bool,
     marked: HashSet<PathBuf>,
@@ -236,6 +242,8 @@ impl App {
             analysis_rows: Vec::new(),
             analysis_selected: 0,
             analysis_scroll: 0,
+            analysis_rows_truncated: false,
+            analysis_found_usage: crate::tree::UsageStats::default(),
             comparison: None,
             watch_enabled: settings.watch,
             marked: HashSet::new(),
@@ -335,6 +343,9 @@ impl App {
         if self.watch_enabled {
             parts.push("watching".to_owned());
         }
+        if self.active_view != ViewKind::Tree && self.analysis_rows_truncated {
+            parts.push(format!("top {} rows", self.analysis_rows.len()));
+        }
         if let Some(notice) = &self.notice {
             parts.push(notice.clone());
         }
@@ -354,6 +365,19 @@ impl App {
 
     pub fn can_delete_path(&self, path: &Path) -> bool {
         path != self.root && path.starts_with(&self.root)
+    }
+
+    pub fn analysis_known_usage(&self) -> crate::tree::UsageStats {
+        self.analysis_index
+            .as_ref()
+            .map(|index| {
+                if index.complete {
+                    index.root_usage()
+                } else {
+                    self.analysis_found_usage
+                }
+            })
+            .unwrap_or_default()
     }
 
     pub fn selected_index(&self) -> Option<usize> {
@@ -481,13 +505,22 @@ impl App {
     }
 
     fn drain_events(&mut self) {
-        while let Ok(event) = self.scan_pool.try_recv() {
+        for _ in 0..MAX_SCAN_EVENTS_PER_TICK {
+            let Ok(event) = self.scan_pool.try_recv() else {
+                break;
+            };
             self.handle_worker_event(event);
         }
-        while let Ok(event) = self.analysis_worker.try_recv() {
+        for _ in 0..MAX_ANALYSIS_EVENTS_PER_TICK {
+            let Ok(event) = self.analysis_worker.try_recv() else {
+                break;
+            };
             self.handle_analysis_event(event);
         }
-        while let Ok(result) = self.file_worker.try_recv() {
+        for _ in 0..MAX_FILE_EVENTS_PER_TICK {
+            let Ok(result) = self.file_worker.try_recv() else {
+                break;
+            };
             self.handle_delete_result(result);
         }
         let watch_batch = self.watcher.as_mut().and_then(WatchService::poll);
@@ -516,8 +549,10 @@ impl App {
         self.analysis_index = Some(index);
         self.analysis_status = AnalysisStatus::Indexing;
         self.analysis_rows.clear();
+        self.analysis_rows_truncated = false;
         self.analysis_selected = 0;
         self.analysis_scroll = 0;
+        self.analysis_found_usage = crate::tree::UsageStats::default();
         if let Err(error) = self.analysis_worker.start_index(
             self.generation,
             self.root.clone(),
@@ -561,6 +596,7 @@ impl App {
 
         index.complete = false;
         index.duplicates = None;
+        self.analysis_found_usage = index.root_usage();
         for path in &roots {
             let previous = index
                 .directories
@@ -569,6 +605,7 @@ impl App {
                 .map(|directory| directory.usage)
                 .unwrap_or_default();
             self.analysis_previous_usage.insert(path.clone(), previous);
+            self.analysis_found_usage = subtract_usage(self.analysis_found_usage, previous);
             index.remove_subtree(path);
             self.analysis_refresh_pending.insert(path.clone());
         }
@@ -623,9 +660,15 @@ impl App {
                 self.analysis_status = AnalysisStatus::Indexing;
             }
             AnalysisEvent::FileBatch { files, .. } => {
+                let batch_usage = files
+                    .iter()
+                    .map(|file| file.usage)
+                    .fold(crate::tree::UsageStats::default(), |total, usage| {
+                        total.saturating_add(usage)
+                    });
+                self.analysis_found_usage = self.analysis_found_usage.saturating_add(batch_usage);
                 if let Some(index) = &mut self.analysis_index {
                     index.files.extend(files);
-                    self.rebuild_analysis_rows();
                 }
             }
             AnalysisEvent::Finished {
@@ -670,9 +713,13 @@ impl App {
                     }
                 }
                 if !self.analysis_refresh_pending.is_empty() {
-                    self.rebuild_analysis_rows();
                     return;
                 }
+                self.analysis_found_usage = self
+                    .analysis_index
+                    .as_ref()
+                    .map(AnalysisIndex::root_usage)
+                    .unwrap_or_default();
                 self.analysis_status = AnalysisStatus::Ready;
                 self.finish_analysis_snapshot();
                 self.rebuild_analysis_rows();
@@ -755,11 +802,23 @@ impl App {
     }
 
     fn set_view(&mut self, view: ViewKind) {
+        let changed = self.active_view != view;
         self.active_view = view;
         if view == ViewKind::Tree {
             self.ensure_selection_visible();
         } else {
             self.ensure_analysis();
+            if changed
+                && self
+                    .analysis_index
+                    .as_ref()
+                    .is_some_and(|index| !index.complete)
+            {
+                self.analysis_rows.clear();
+                self.analysis_rows_truncated = false;
+                self.analysis_selected = 0;
+                self.analysis_scroll = 0;
+            }
             self.rebuild_analysis_rows();
             self.ensure_analysis_selection_visible();
         }
@@ -771,37 +830,57 @@ impl App {
         }
         let Some(index) = &self.analysis_index else {
             self.analysis_rows.clear();
+            self.analysis_rows_truncated = false;
             return;
         };
+        if !index.complete {
+            return;
+        }
         let matches = |file: &FileRecord| {
             self.filter_expression
                 .as_ref()
                 .is_none_or(|filter| filter.matches_file(file, self.size_mode))
         };
+        let mut truncated = false;
         let mut rows = match self.active_view {
             ViewKind::Tree => Vec::new(),
-            ViewKind::Largest => index
-                .files
-                .iter()
-                .filter(|file| matches(file))
-                .map(|file| AnalysisRow {
-                    label: file
-                        .path
-                        .file_name()
-                        .unwrap_or(file.path.as_os_str())
-                        .to_string_lossy()
-                        .into_owned(),
-                    path: Some(file.path.clone()),
-                    usage: file.usage,
-                    files: 1,
-                    detail: format!(
-                        "{} · {}",
-                        file.category.label(),
-                        file.extension.as_deref().unwrap_or("no extension")
-                    ),
-                    indent: 0,
-                })
-                .collect(),
+            ViewKind::Largest => {
+                let mut files = index
+                    .files
+                    .iter()
+                    .filter(|file| matches(file))
+                    .collect::<Vec<_>>();
+                if files.len() > MAX_ANALYSIS_ROWS {
+                    truncated = true;
+                    files.select_nth_unstable_by(MAX_ANALYSIS_ROWS, |left, right| {
+                        compare_file_records(left, right, self.sort, self.size_mode)
+                    });
+                    files.truncate(MAX_ANALYSIS_ROWS);
+                }
+                files.sort_unstable_by(|left, right| {
+                    compare_file_records(left, right, self.sort, self.size_mode)
+                });
+                files
+                    .into_iter()
+                    .map(|file| AnalysisRow {
+                        label: file
+                            .path
+                            .file_name()
+                            .unwrap_or(file.path.as_os_str())
+                            .to_string_lossy()
+                            .into_owned(),
+                        path: Some(file.path.clone()),
+                        usage: file.usage,
+                        files: 1,
+                        detail: format!(
+                            "{} · {}",
+                            file.category.label(),
+                            file.extension.as_deref().unwrap_or("no extension")
+                        ),
+                        indent: 0,
+                    })
+                    .collect()
+            }
             ViewKind::Types => {
                 let summary = index.summary(index.files.iter().filter(|file| matches(file)));
                 let mut rows = Vec::new();
@@ -924,14 +1003,16 @@ impl App {
                 })
                 .collect(),
         };
-        if matches!(
-            self.active_view,
-            ViewKind::Largest | ViewKind::Types | ViewKind::Changes
-        ) {
+        if matches!(self.active_view, ViewKind::Types | ViewKind::Changes) {
             rows.sort_by(|left, right| {
                 compare_analysis_rows(left, right, self.sort, self.size_mode)
             });
         }
+        if rows.len() > MAX_ANALYSIS_ROWS {
+            rows.truncate(MAX_ANALYSIS_ROWS);
+            truncated = true;
+        }
+        self.analysis_rows_truncated = truncated;
         self.analysis_rows = rows;
         self.analysis_selected = self
             .analysis_selected
@@ -1680,6 +1761,7 @@ impl App {
         self.marked.clear();
         self.analysis_index = None;
         self.analysis_rows.clear();
+        self.analysis_rows_truncated = false;
         self.analysis_selected = 0;
         self.analysis_scroll = 0;
         self.analysis_status = AnalysisStatus::Idle;
@@ -1713,6 +1795,7 @@ impl App {
             .ok_or_else(|| anyhow!("Scan generation overflow"))?;
         self.scan_pool.set_generation(self.generation);
         self.analysis_worker.set_generation(self.generation);
+        self.analysis_worker.discard_pending();
         Ok(())
     }
 
@@ -2447,6 +2530,25 @@ fn compare_analysis_rows(
     ordering.then_with(|| left.path.cmp(&right.path))
 }
 
+fn compare_file_records(
+    left: &FileRecord,
+    right: &FileRecord,
+    sort: SortSpec,
+    size_mode: SizeMode,
+) -> std::cmp::Ordering {
+    let ordering = match sort.key {
+        SortKey::Size => left.usage.size(size_mode).cmp(&right.usage.size(size_mode)),
+        SortKey::Files => std::cmp::Ordering::Equal,
+        SortKey::Name => left.path.file_name().cmp(&right.path.file_name()),
+        SortKey::Kind => left.category.cmp(&right.category),
+    };
+    let ordering = match sort.direction {
+        SortDirection::Ascending => ordering,
+        SortDirection::Descending => ordering.reverse(),
+    };
+    ordering.then_with(|| left.path.cmp(&right.path))
+}
+
 fn replace_usage(
     total: crate::tree::UsageStats,
     previous: crate::tree::UsageStats,
@@ -2557,7 +2659,6 @@ mod tests {
         let path = root.join(name);
         FileRecord {
             path,
-            name: OsString::from(name),
             usage: UsageStats {
                 logical: size,
                 physical: size / 2,
@@ -3046,5 +3147,50 @@ mod tests {
         assert!(index.complete);
         assert_eq!(index.files.len(), 2);
         assert_eq!(index.root_usage().logical, 24);
+    }
+
+    #[test]
+    fn largest_view_does_not_rebuild_and_sort_for_every_file_batch() {
+        let root_dir = tempdir().unwrap();
+        let root = fs::canonicalize(root_dir.path()).unwrap();
+        let mut app = App::new(root.clone(), 1).unwrap();
+        app.active_view = ViewKind::Largest;
+        app.analysis_status = AnalysisStatus::Indexing;
+        app.analysis_index = Some(AnalysisIndex::new(root.clone(), true, 1));
+
+        for batch in 0..32 {
+            let files = (0..256)
+                .map(|index| analysis_file(&root, &format!("file-{batch:02}-{index:03}.bin"), 1))
+                .collect();
+            app.handle_analysis_event(AnalysisEvent::FileBatch {
+                generation: app.generation,
+                files,
+            });
+        }
+
+        assert_eq!(app.analysis_index.as_ref().unwrap().files.len(), 8_192);
+        assert_eq!(app.analysis_known_usage().logical, 8_192);
+        assert!(app.analysis_rows.is_empty());
+    }
+
+    #[test]
+    fn largest_view_caps_materialized_rows_for_very_large_indexes() {
+        let root_dir = tempdir().unwrap();
+        let root = fs::canonicalize(root_dir.path()).unwrap();
+        let mut app = App::new(root.clone(), 1).unwrap();
+        app.active_view = ViewKind::Largest;
+        app.analysis_status = AnalysisStatus::Ready;
+        let mut index = AnalysisIndex::new(root.clone(), true, 1);
+        index.complete = true;
+        index.files = (0..=MAX_ANALYSIS_ROWS)
+            .map(|number| analysis_file(&root, &format!("file-{number}.bin"), number as u64))
+            .collect();
+        app.analysis_index = Some(index);
+
+        app.rebuild_analysis_rows();
+
+        assert_eq!(app.analysis_rows.len(), MAX_ANALYSIS_ROWS);
+        assert!(app.analysis_rows_truncated);
+        assert_eq!(app.analysis_rows[0].usage.logical, MAX_ANALYSIS_ROWS as u64);
     }
 }
