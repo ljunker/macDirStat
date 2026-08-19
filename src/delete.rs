@@ -23,9 +23,9 @@ impl Trash for SystemTrash {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DeleteItem {
-    pub node_id: NodeId,
+    pub node_id: Option<NodeId>,
     pub path: PathBuf,
 }
 
@@ -38,7 +38,6 @@ pub struct DeleteRequest {
 
 #[derive(Debug)]
 pub struct DeleteFailure {
-    pub node_id: NodeId,
     pub path: PathBuf,
     pub message: String,
 }
@@ -74,7 +73,6 @@ impl FileOperationWorker {
                         match validate_delete_target(&request.root, &item.path) {
                             Ok(path) => verified.push((item, path)),
                             Err(error) => failures.push(DeleteFailure {
-                                node_id: item.node_id,
                                 path: item.path,
                                 message: error.to_string(),
                             }),
@@ -87,7 +85,6 @@ impl FileOperationWorker {
                             match trash.delete(&verified_path) {
                                 Ok(()) => moved.push(item),
                                 Err(message) => failures.push(DeleteFailure {
-                                    node_id: item.node_id,
                                     path: item.path,
                                     message,
                                 }),
@@ -96,7 +93,6 @@ impl FileOperationWorker {
                     } else {
                         for (item, _) in verified {
                             failures.push(DeleteFailure {
-                                node_id: item.node_id,
                                 path: item.path,
                                 message: "Batch cancelled because another item failed validation"
                                     .to_owned(),
@@ -227,11 +223,11 @@ mod tests {
                 root,
                 items: vec![
                     DeleteItem {
-                        node_id: tree.root_id,
+                        node_id: Some(tree.root_id),
                         path: first.clone(),
                     },
                     DeleteItem {
-                        node_id: tree.root_id,
+                        node_id: Some(tree.root_id),
                         path: second.clone(),
                     },
                 ],
@@ -262,11 +258,11 @@ mod tests {
                 root: root.clone(),
                 items: vec![
                     DeleteItem {
-                        node_id: tree.root_id,
+                        node_id: Some(tree.root_id),
                         path: valid,
                     },
                     DeleteItem {
-                        node_id: tree.root_id,
+                        node_id: Some(tree.root_id),
                         path: root.join("missing"),
                     },
                 ],

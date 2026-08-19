@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, AppMode, PromptKind},
+    app::{AnalysisStatus, App, AppMode, PromptKind, ViewKind},
     format::format_size,
     theme::Theme,
     tree::{Node, NodeKind, ScanState, SizeMode},
@@ -17,7 +17,7 @@ use crate::{
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let theme = Theme::for_kind(app.theme);
     let [header_area, content_area, footer_area] = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(3),
         Constraint::Min(0),
         Constraint::Length(2),
     ])
@@ -35,18 +35,44 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
         Span::raw(" — "),
         Span::raw(app.root.to_string_lossy()),
     ]);
-    let usage = app.tree.root_known_usage();
+    let tabs = Line::from(
+        ViewKind::ALL
+            .iter()
+            .enumerate()
+            .flat_map(|(index, view)| {
+                let style = if *view == app.active_view {
+                    theme.selected
+                } else {
+                    theme.columns
+                };
+                [
+                    Span::styled(format!(" {}:{} ", index + 1, view.label()), style),
+                    Span::raw(" "),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    );
+    let usage = app
+        .analysis_index
+        .as_ref()
+        .filter(|_| app.active_view != ViewKind::Tree)
+        .map_or_else(|| app.tree.root_known_usage(), |index| index.root_usage());
+    let visible = if app.active_view == ViewKind::Tree {
+        app.visible.len()
+    } else {
+        app.analysis_rows.len()
+    };
     let summary = Line::from(format!(
         "{}: {}   Files: {}   Visible: {}   Sort: {}{}   Theme: {}",
         capitalize(app.size_mode.label()),
         format_size(usage.size(app.size_mode)),
         usage.files,
-        app.visible.len(),
+        visible,
         app.sort.key.label(),
         app.sort.direction.symbol(),
         app.theme.label(),
     ));
-    frame.render_widget(Paragraph::new(vec![title, summary]), area);
+    frame.render_widget(Paragraph::new(vec![title, tabs, summary]), area);
 }
 
 fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Theme) {
@@ -54,16 +80,80 @@ fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Theme
         let [tree_area, detail_area] =
             Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
                 .areas(area);
-        render_tree(frame, app, tree_area, theme);
+        render_primary(frame, app, tree_area, theme);
         render_detail(frame, app, detail_area, theme);
     } else if app.detail_panel && area.height >= 12 {
         let [tree_area, detail_area] =
             Layout::vertical([Constraint::Min(3), Constraint::Length(8)]).areas(area);
-        render_tree(frame, app, tree_area, theme);
+        render_primary(frame, app, tree_area, theme);
         render_detail(frame, app, detail_area, theme);
     } else {
-        render_tree(frame, app, area, theme);
+        render_primary(frame, app, area, theme);
     }
+}
+
+fn render_primary(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Theme) {
+    if app.active_view == ViewKind::Tree {
+        render_tree(frame, app, area, theme);
+    } else {
+        render_analysis(frame, app, area, theme);
+    }
+}
+
+fn render_analysis(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Theme) {
+    let [columns_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let columns = match app.active_view {
+        ViewKind::Largest => "Mark       Size       Files  Type / Name",
+        ViewKind::Types => "           Size       Files  Group",
+        ViewKind::Duplicates => "Mark    Reclaim/Size   Files  Duplicate group / file",
+        ViewKind::Changes => "Mark       Size       Files  Change / Name",
+        ViewKind::Tree => "",
+    };
+    frame.render_widget(Paragraph::new(columns).style(theme.columns), columns_area);
+    app.set_list_area(list_area);
+
+    let end = app
+        .analysis_scroll
+        .saturating_add(app.page_size)
+        .min(app.analysis_rows.len());
+    let items = app.analysis_rows[app.analysis_scroll..end]
+        .iter()
+        .map(|row| {
+            let marker = row
+                .path
+                .as_ref()
+                .filter(|path| app.can_delete_path(path))
+                .map_or("   ", |path| {
+                    if app.is_path_marked(path) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    }
+                });
+            let name = format!("{}{}", "  ".repeat(row.indent), row.label);
+            ListItem::new(Line::from(vec![
+                Span::raw(format!(
+                    "{marker} {:>10} {:>10}  ",
+                    format_size(row.usage.size(app.size_mode)),
+                    row.files
+                )),
+                Span::styled(format!("{} · {name}", row.detail), theme.directory),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default();
+    if !app.analysis_rows.is_empty()
+        && app.analysis_selected >= app.analysis_scroll
+        && app.analysis_selected < end
+    {
+        state.select(Some(app.analysis_selected - app.analysis_scroll));
+    }
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(theme.selected),
+        list_area,
+        &mut state,
+    );
 }
 
 fn render_tree(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Theme) {
@@ -168,49 +258,79 @@ fn render_node(
 }
 
 fn render_detail(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
-    let lines = app.selected_node().map_or_else(
-        || vec![Line::from("No item selected")],
-        |node| {
-            let logical = node
-                .usage
-                .map_or_else(|| "unknown".to_owned(), |usage| format_size(usage.logical));
-            let physical = node
-                .usage
-                .map_or_else(|| "unknown".to_owned(), |usage| format_size(usage.physical));
-            let files = node
-                .usage
-                .map_or_else(|| "unknown".to_owned(), |usage| usage.files.to_string());
-            let modified = node.modified.map_or_else(
-                || "unknown".to_owned(),
-                |modified| {
-                    let timestamp: DateTime<Local> = modified.into();
-                    timestamp.format("%Y-%m-%d %H:%M:%S").to_string()
+    let lines =
+        if app.active_view != ViewKind::Tree {
+            app.selected_analysis_row().map_or_else(
+                || {
+                    vec![Line::from(match app.analysis_status {
+                        AnalysisStatus::Idle => "Analysis has not started",
+                        AnalysisStatus::Indexing => "Building analysis index…",
+                        AnalysisStatus::Hashing => "Hashing duplicate candidates…",
+                        AnalysisStatus::Ready => "No analysis row selected",
+                    })]
                 },
-            );
-            let source = if node.cached { "cached" } else { "fresh" };
-            let mountpoint = if node.mountpoint {
-                " | mount point"
-            } else {
-                ""
-            };
-            let error = node.error.as_deref().unwrap_or("none");
-            vec![
-                Line::from(format!(
-                    "{} | {} | {source}{mountpoint}",
-                    node.kind.label(),
-                    node.scan_state.label()
-                )),
-                Line::from(format!("Logical: {logical} | Physical: {physical}")),
-                Line::from(format!(
-                    "Files: {files} | Relative: {}",
-                    format_percentage(app.selected_percentage())
-                )),
-                Line::from(format!("Modified: {modified}")),
-                Line::from(node.path.to_string_lossy().into_owned()),
-                Line::from(format!("Warnings: {} | Error: {error}", node.warning_count)),
-            ]
-        },
-    );
+                |row| {
+                    vec![
+                        Line::from(format!("{} · {}", app.active_view.label(), row.detail)),
+                        Line::from(format!(
+                            "Logical: {} | Physical: {}",
+                            format_size(row.usage.logical),
+                            format_size(row.usage.physical)
+                        )),
+                        Line::from(format!("Files: {}", row.files)),
+                        Line::from(row.path.as_ref().map_or_else(
+                            || row.label.clone(),
+                            |path| path.to_string_lossy().into(),
+                        )),
+                        Line::from("Enter reveals paths in Tree; Space marks individual paths"),
+                    ]
+                },
+            )
+        } else {
+            app.selected_node().map_or_else(
+                || vec![Line::from("No item selected")],
+                |node| {
+                    let logical = node
+                        .usage
+                        .map_or_else(|| "unknown".to_owned(), |usage| format_size(usage.logical));
+                    let physical = node
+                        .usage
+                        .map_or_else(|| "unknown".to_owned(), |usage| format_size(usage.physical));
+                    let files = node
+                        .usage
+                        .map_or_else(|| "unknown".to_owned(), |usage| usage.files.to_string());
+                    let modified = node.modified.map_or_else(
+                        || "unknown".to_owned(),
+                        |modified| {
+                            let timestamp: DateTime<Local> = modified.into();
+                            timestamp.format("%Y-%m-%d %H:%M:%S").to_string()
+                        },
+                    );
+                    let source = if node.cached { "cached" } else { "fresh" };
+                    let mountpoint = if node.mountpoint {
+                        " | mount point"
+                    } else {
+                        ""
+                    };
+                    let error = node.error.as_deref().unwrap_or("none");
+                    vec![
+                        Line::from(format!(
+                            "{} | {} | {source}{mountpoint}",
+                            node.kind.label(),
+                            node.scan_state.label()
+                        )),
+                        Line::from(format!("Logical: {logical} | Physical: {physical}")),
+                        Line::from(format!(
+                            "Files: {files} | Relative: {}",
+                            format_percentage(app.selected_percentage())
+                        )),
+                        Line::from(format!("Modified: {modified}")),
+                        Line::from(node.path.to_string_lossy().into_owned()),
+                        Line::from(format!("Warnings: {} | Error: {error}", node.warning_count)),
+                    ]
+                },
+            )
+        };
     frame.render_widget(
         Paragraph::new(lines)
             .style(theme.dialog)
@@ -228,7 +348,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let footer = vec![
         Line::from(format!("{}{}", app.status_text(), filter)),
         Line::from(
-            "? Help  ↑↓/jk Move  ←→/hl Open  / Search  f Filter  s Sort  z Size  Space Mark  d/x Trash  q Quit",
+            "? Help  Tab/1-5 Views  ↑↓/jk Move  Enter Reveal/Open  / Search  f Filter  e Export  w Watch  Space Mark  d/x Trash  q Quit",
         ),
     ];
     frame.render_widget(Paragraph::new(footer), area);
@@ -239,14 +359,14 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, theme: Theme) {
         AppMode::Browse => {}
         AppMode::Help => render_help(frame, app, theme),
         AppMode::Input { kind, value, .. } => render_prompt(frame, *kind, value, theme),
-        AppMode::ConfirmDelete { node_ids, multi } => {
-            render_delete_confirmation(frame, app, node_ids, *multi, theme);
+        AppMode::ConfirmDelete { items, multi } => {
+            render_delete_confirmation(frame, app, items, *multi, theme);
         }
-        AppMode::Deleting { node_ids, .. } => render_message(
+        AppMode::Deleting { items, .. } => render_message(
             frame,
             " Moving to Trash ",
             vec![
-                Line::from(format!("Moving {} item(s) to Trash", node_ids.len())),
+                Line::from(format!("Moving {} item(s) to Trash", items.len())),
                 Line::from(""),
                 Line::from("Please wait…"),
             ],
@@ -268,28 +388,38 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, theme: Theme) {
 fn render_delete_confirmation(
     frame: &mut Frame<'_>,
     app: &App,
-    node_ids: &[crate::tree::NodeId],
+    items: &[crate::delete::DeleteItem],
     multi: bool,
     theme: Theme,
 ) {
-    if !multi && node_ids.len() == 1 {
-        let Some(node) = app.tree.nodes.get(node_ids[0]) else {
-            return;
-        };
-        let size = node.usage.map_or_else(
+    if !multi && items.len() == 1 {
+        let item = &items[0];
+        let node = item.node_id.and_then(|node_id| app.tree.nodes.get(node_id));
+        let usage = node.and_then(|node| node.usage).or_else(|| {
+            app.analysis_index.as_ref().and_then(|index| {
+                index
+                    .files
+                    .iter()
+                    .find(|file| file.path == item.path)
+                    .map(|file| file.usage)
+            })
+        });
+        let size = usage.map_or_else(
             || "unknown size".to_owned(),
             |usage| format_size(usage.size(app.size_mode)),
         );
+        let name = item
+            .path
+            .file_name()
+            .unwrap_or(item.path.as_os_str())
+            .to_string_lossy();
         render_message(
             frame,
             " Move to Trash ",
             vec![
-                Line::from(format!(
-                    "Move \"{}\" to Trash?",
-                    node.name.to_string_lossy()
-                )),
+                Line::from(format!("Move \"{}\" to Trash?", name)),
                 Line::from(format!("Size: {size}")),
-                Line::from(node.path.to_string_lossy().into_owned()),
+                Line::from(item.path.to_string_lossy().into_owned()),
                 Line::from(""),
                 Line::from("[y] Yes    [n/Esc] Cancel"),
             ],
@@ -298,19 +428,32 @@ fn render_delete_confirmation(
         return;
     }
 
-    let nodes: Vec<_> = node_ids
+    let usages: Vec<_> = items
         .iter()
-        .filter_map(|node_id| app.tree.nodes.get(*node_id))
+        .map(|item| {
+            item.node_id
+                .and_then(|node_id| app.tree.nodes.get(node_id))
+                .and_then(|node| node.usage)
+                .or_else(|| {
+                    app.analysis_index.as_ref().and_then(|index| {
+                        index
+                            .files
+                            .iter()
+                            .find(|file| file.path == item.path)
+                            .map(|file| file.usage)
+                    })
+                })
+        })
         .collect();
-    if nodes.is_empty() {
+    if items.is_empty() {
         return;
     }
-    let known_total = nodes
+    let known_total = usages
         .iter()
-        .filter_map(|node| node.usage)
+        .filter_map(|usage| *usage)
         .map(|usage| usage.size(app.size_mode))
         .fold(0, u64::saturating_add);
-    let unknown = nodes.iter().filter(|node| node.usage.is_none()).count();
+    let unknown = usages.iter().filter(|usage| usage.is_none()).count();
     let size = if unknown == 0 {
         format_size(known_total)
     } else {
@@ -323,7 +466,7 @@ fn render_delete_confirmation(
         frame,
         " Move marked items to Trash ",
         vec![
-            Line::from(format!("Move {} marked items to Trash?", nodes.len())),
+            Line::from(format!("Move {} marked items to Trash?", items.len())),
             Line::from(format!("Combined size: {size}")),
             Line::from(""),
             Line::from("All items are validated before the first move."),
@@ -344,14 +487,20 @@ fn render_help(frame: &mut Frame<'_>, app: &App, theme: Theme) {
         "  Backspace       use parent directory as root",
         "",
         "Find and view",
+        "  Tab/Shift-Tab   next/previous view",
+        "  1..5            Tree/Largest/Types/Duplicates/Changes",
+        "  Enter           open directory or reveal analysis path",
         "  /               search loaded nodes",
         "  n/N             next/previous search result",
-        "  f/F             set/clear name filter",
+        "  f/F             set/clear AND filter predicates",
+        "                  size>1GiB age>30d ext:log type:image",
         "  s/S             cycle sort key/reverse direction",
         "  z               logical/physical size",
         "  i               toggle detail panel",
         "  t               cycle theme",
         "  m               toggle mouse capture",
+        "  w               toggle native filesystem watcher",
+        "  e               export full JSON snapshot",
         "",
         "Scanning and cleanup",
         "  Esc             cancel active scan",
@@ -392,9 +541,10 @@ fn render_prompt(frame: &mut Frame<'_>, kind: PromptKind, value: &str, theme: Th
     let (title, hint) = match kind {
         PromptKind::Search => (" Search loaded tree ", "Enter search  Esc cancel"),
         PromptKind::Filter => (
-            " Filter loaded tree ",
-            "Updates live  Enter keep  Esc restore",
+            " Filter tree and analysis ",
+            "AND: name size>1GiB age>30d ext:log|none type:image  Enter keep",
         ),
+        PromptKind::Export => (" Export JSON snapshot ", "Enter write file  Esc cancel"),
     };
     let area = centered(frame.area(), 72, 5);
     frame.render_widget(Clear, area);
@@ -456,7 +606,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::theme::ThemeKind;
+    use crate::{
+        app::{AnalysisRow, AnalysisStatus, ViewKind},
+        theme::ThemeKind,
+        tree::UsageStats,
+    };
 
     #[test]
     fn renders_small_narrow_and_wide_layouts_in_all_themes() {
@@ -495,6 +649,39 @@ mod tests {
             previous_filter: None,
         };
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn renders_every_analysis_tab_with_adaptive_details() {
+        let root = tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        for view in [
+            ViewKind::Largest,
+            ViewKind::Types,
+            ViewKind::Duplicates,
+            ViewKind::Changes,
+        ] {
+            let mut app = App::new(root_path.clone(), 1).unwrap();
+            app.active_view = view;
+            app.analysis_status = AnalysisStatus::Ready;
+            app.analysis_rows = vec![AnalysisRow {
+                label: "sample".to_owned(),
+                path: Some(root_path.join("sample")),
+                usage: UsageStats {
+                    logical: 100,
+                    physical: 50,
+                    files: 1,
+                },
+                files: 1,
+                detail: view.label().to_owned(),
+                indent: usize::from(view == ViewKind::Duplicates),
+            }];
+            for (width, height) in [(50, 16), (120, 30)] {
+                let backend = TestBackend::new(width, height);
+                let mut terminal = Terminal::new(backend).unwrap();
+                terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            }
+        }
     }
 
     #[test]

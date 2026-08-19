@@ -16,6 +16,7 @@ const DEFAULT_CACHE_TTL_HOURS: u64 = 24;
 pub struct AppPaths {
     pub config_file: PathBuf,
     pub cache_file: PathBuf,
+    pub snapshots_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -26,6 +27,7 @@ impl AppPaths {
             config_file: config_override
                 .unwrap_or_else(|| project.config_dir().join("config.toml")),
             cache_file: project.cache_dir().join("scan-cache-v1.json"),
+            snapshots_dir: project.data_dir().join("snapshots"),
         })
     }
 }
@@ -41,6 +43,12 @@ pub struct Settings {
     pub theme: ThemeKind,
     pub detail_panel: bool,
     pub sort: SortSpec,
+    pub watch: bool,
+    pub watch_debounce: Duration,
+    pub snapshots: bool,
+    pub export_json: Option<PathBuf>,
+    pub compare_snapshot: Option<PathBuf>,
+    pub detect_duplicates: bool,
     pub paths: AppPaths,
 }
 
@@ -57,6 +65,9 @@ struct FileConfig {
     detail_panel: Option<bool>,
     sort: Option<SortKey>,
     sort_direction: Option<SortDirection>,
+    watch: Option<bool>,
+    watch_debounce_ms: Option<u64>,
+    snapshots: Option<bool>,
 }
 
 impl Settings {
@@ -97,6 +108,10 @@ impl Settings {
             .sort_direction
             .or(config.sort_direction)
             .unwrap_or_else(|| sort_key.default_direction());
+        let watch_debounce_ms = config.watch_debounce_ms.unwrap_or(750);
+        if watch_debounce_ms == 0 {
+            bail!("watch_debounce_ms must be greater than zero");
+        }
 
         Ok(Self {
             workers,
@@ -119,6 +134,16 @@ impl Settings {
                 key: sort_key,
                 direction: sort_direction,
             },
+            watch: flag_pair(cli.watch, cli.no_watch, config.watch.unwrap_or(false)),
+            watch_debounce: Duration::from_millis(watch_debounce_ms),
+            snapshots: flag_pair(
+                cli.snapshots,
+                cli.no_snapshots,
+                config.snapshots.unwrap_or(true),
+            ),
+            export_json: cli.export_json.clone(),
+            compare_snapshot: cli.compare_snapshot.clone(),
+            detect_duplicates: cli.detect_duplicates,
             paths,
         })
     }
@@ -135,9 +160,16 @@ impl Settings {
             theme: ThemeKind::Default,
             detail_panel: true,
             sort: SortSpec::default(),
+            watch: false,
+            watch_debounce: Duration::from_millis(750),
+            snapshots: false,
+            export_json: None,
+            compare_snapshot: None,
+            detect_duplicates: false,
             paths: AppPaths {
                 config_file: root.join("config.toml"),
                 cache_file: root.join("cache.json"),
+                snapshots_dir: root.join("snapshots"),
             },
         }
     }
@@ -185,6 +217,9 @@ mod tests {
         assert!(settings.detail_panel);
         assert_eq!(settings.sort.key, SortKey::Size);
         assert_eq!(settings.sort.direction, SortDirection::Descending);
+        assert!(!settings.watch);
+        assert_eq!(settings.watch_debounce, Duration::from_millis(750));
+        assert!(settings.snapshots);
     }
 
     #[test]
@@ -199,6 +234,9 @@ size_mode = "physical"
 one_file_system = false
 mouse = true
 sort = "name"
+watch = true
+watch_debounce_ms = 900
+snapshots = false
 "#,
         )
         .unwrap();
@@ -212,6 +250,8 @@ sort = "name"
             "logical",
             "--one-file-system",
             "--no-mouse",
+            "--no-watch",
+            "--snapshots",
         ])
         .unwrap();
 
@@ -222,6 +262,9 @@ sort = "name"
         assert!(!settings.mouse);
         assert_eq!(settings.sort.key, SortKey::Name);
         assert_eq!(settings.sort.direction, SortDirection::Ascending);
+        assert!(!settings.watch);
+        assert_eq!(settings.watch_debounce, Duration::from_millis(900));
+        assert!(settings.snapshots);
     }
 
     #[test]
@@ -245,6 +288,9 @@ sort = "name"
         assert!(Settings::load(&cli).is_err());
 
         fs::write(&config_path, "theme = \"ultraviolet\"").unwrap();
+        assert!(Settings::load(&cli).is_err());
+
+        fs::write(&config_path, "watch_debounce_ms = 0").unwrap();
         assert!(Settings::load(&cli).is_err());
     }
 }

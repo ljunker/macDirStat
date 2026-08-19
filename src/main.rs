@@ -1,13 +1,19 @@
+mod analytics;
 mod app;
 mod cache;
 mod cli;
 mod config;
 mod delete;
+mod filter;
 mod format;
+mod headless;
+mod portable_path;
 mod scanner;
+mod snapshot;
 mod theme;
 mod tree;
 mod ui;
+mod watcher;
 mod worker;
 
 use std::fs;
@@ -25,6 +31,10 @@ fn main() -> Result<()> {
 
     if !root.is_dir() {
         bail!("Start path is not a directory: {}", root.display());
+    }
+
+    if settings.export_json.is_some() {
+        return headless::run(root, &settings);
     }
 
     let mut app = App::with_settings(root, settings)?;

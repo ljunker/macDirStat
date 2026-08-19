@@ -308,12 +308,25 @@ impl Tree {
     }
 
     pub fn flatten_visible_filtered(&self, filter: Option<&str>) -> Vec<VisibleNode> {
-        let filter = filter.filter(|filter| !filter.is_empty());
+        let matcher = filter
+            .filter(|filter| !filter.is_empty())
+            .map(|filter| move |node: &Node| node.matches_name(filter));
+        self.flatten_visible_matching(
+            matcher
+                .as_ref()
+                .map(|matcher| matcher as &dyn Fn(&Node) -> bool),
+        )
+    }
+
+    pub fn flatten_visible_matching(
+        &self,
+        matcher: Option<&dyn Fn(&Node) -> bool>,
+    ) -> Vec<VisibleNode> {
         let mut visible = Vec::new();
         if let Some(root) = self.nodes.get(self.root_id) {
             for &child in &root.children {
-                if let Some(filter) = filter {
-                    self.flatten_filtered_from(child, 0, filter, &mut visible);
+                if let Some(matcher) = matcher {
+                    self.flatten_matching_from(child, 0, matcher, &mut visible);
                 } else {
                     self.flatten_from(child, 0, &mut visible);
                 }
@@ -338,23 +351,23 @@ impl Tree {
         }
     }
 
-    fn flatten_filtered_from(
+    fn flatten_matching_from(
         &self,
         node_id: NodeId,
         depth: usize,
-        filter: &str,
+        matcher: &dyn Fn(&Node) -> bool,
         output: &mut Vec<VisibleNode>,
     ) -> bool {
         let Some(node) = self.nodes.get(node_id) else {
             return false;
         };
-        let matched = node.matches_name(filter);
+        let matched = matcher(node);
         let mut descendants = Vec::new();
         let mut descendant_matched = false;
         if node.kind == NodeKind::Directory {
             for &child in &node.children {
                 descendant_matched |=
-                    self.flatten_filtered_from(child, depth + 1, filter, &mut descendants);
+                    self.flatten_matching_from(child, depth + 1, matcher, &mut descendants);
             }
         }
         if matched || descendant_matched {

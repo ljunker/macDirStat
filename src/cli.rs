@@ -77,6 +77,34 @@ pub struct Cli {
     /// Initial sort direction
     #[arg(long, value_enum)]
     pub sort_direction: Option<SortDirection>,
+
+    /// Watch the scanned tree for filesystem changes
+    #[arg(long, conflicts_with_all = ["no_watch", "export_json"])]
+    pub watch: bool,
+
+    /// Disable filesystem watching
+    #[arg(long, conflicts_with = "watch")]
+    pub no_watch: bool,
+
+    /// Enable rolling snapshots after full analysis
+    #[arg(long, conflicts_with = "no_snapshots")]
+    pub snapshots: bool,
+
+    /// Disable rolling snapshots
+    #[arg(long, conflicts_with = "snapshots")]
+    pub no_snapshots: bool,
+
+    /// Write a complete analysis as JSON and exit; use - for stdout
+    #[arg(long, value_name = "FILE", conflicts_with = "watch")]
+    pub export_json: Option<PathBuf>,
+
+    /// Compare a full analysis against this snapshot
+    #[arg(long, value_name = "FILE")]
+    pub compare_snapshot: Option<PathBuf>,
+
+    /// Hash exact duplicate candidates during full analysis
+    #[arg(long)]
+    pub detect_duplicates: bool,
 }
 
 #[cfg(test)]
@@ -128,5 +156,23 @@ mod tests {
     fn rejects_zero_workers_and_conflicting_flags() {
         assert!(Cli::try_parse_from(["macDirStat", "--workers", "0"]).is_err());
         assert!(Cli::try_parse_from(["macDirStat", "--mouse", "--no-mouse"]).is_err());
+        assert!(Cli::try_parse_from(["macDirStat", "--watch", "--export-json", "-"]).is_err());
+    }
+
+    #[test]
+    fn parses_phase_three_options() {
+        let cli = Cli::try_parse_from([
+            "macDirStat",
+            "--watch",
+            "--snapshots",
+            "--compare-snapshot",
+            "before.json",
+            "--detect-duplicates",
+        ])
+        .unwrap();
+        assert!(cli.watch);
+        assert!(cli.snapshots);
+        assert_eq!(cli.compare_snapshot, Some(PathBuf::from("before.json")));
+        assert!(cli.detect_duplicates);
     }
 }
