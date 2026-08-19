@@ -33,9 +33,9 @@ Intel-Macs (`x86_64`). Nach dem Download kann das passende Archiv beispielsweise
 so installiert werden:
 
 ```bash
-tar -xzf macDirStat-v0.3.0-macos-arm64.tar.gz
+tar -xzf macDirStat-v0.3.1-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 macDirStat-v0.3.0-macos-arm64/macDirStat ~/.local/bin/macDirStat
+install -m 755 macDirStat-v0.3.1-macos-arm64/macDirStat ~/.local/bin/macDirStat
 ```
 
 ## Bedienung
