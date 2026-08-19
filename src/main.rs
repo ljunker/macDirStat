@@ -19,12 +19,13 @@ mod worker;
 use std::fs;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
 
 use crate::{app::App, cli::Cli, config::Settings};
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let Some(cli) = Cli::parse_with_help_pager()? else {
+        return Ok(());
+    };
     let settings = Settings::load(&cli)?;
     let root = fs::canonicalize(&cli.path)
         .with_context(|| format!("Cannot open start path: {}", cli.path.display()))?;
